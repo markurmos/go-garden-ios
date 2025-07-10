@@ -1,0 +1,9 @@
+{
+  "background_color": "#22c55e",
+  "display": "standalone",
+  "lang": "en",
+  "name": "Go Garden iOS",
+  "short_name": "Go Garden iOS",
+  "start_url": "/?utm_source=web_app_manifest",
+  "orientation": "portrait"
+}
