@@ -1,6 +1,45 @@
-# Go Garden iOS 🌱📱
+# Go Garden 🌱
 
-A comprehensive garden planning app built with React Native and Expo, featuring AI-powered plant identification, curated gardening content, and personalized plant recommendations based on your location and hardiness zone.
+A comprehensive gardening companion app built with React Native and Expo. Plan, track, and grow your perfect garden with smart reminders, plant identification, and personalized care guides.
+
+## 🌟 New Features Added
+
+### 💧 Smart Watering Tracker
+- Visual watering schedule for all plants
+- One-tap watering with animations
+- Progress tracking from seed to harvest
+- Automatic reminder rescheduling
+
+### 🔔 Plant Care Notifications
+- Customizable watering reminders
+- Harvest notifications
+- Daily garden check alerts
+- Care tips at optimal times
+
+### 📊 Enhanced Plant Database
+- Detailed care information for 25+ plants
+- Watering frequency & sunlight needs
+- Companion planting suggestions
+- Pest & disease information
+- Nutritional data
+
+### 🔐 User Authentication
+- Secure sign up/sign in with Supabase
+- Cloud sync for registered users
+- Guest mode available
+- Profile management
+
+### 💾 Offline Data Persistence
+- All garden data saved locally
+- Works without internet
+- Automatic cloud sync when online
+- Never lose your garden progress
+
+### 🎨 Modern UI/UX
+- Beautiful plant cards with animations
+- Smooth transitions
+- Intuitive navigation
+- Professional design system
 
 ## ✨ Features
 
