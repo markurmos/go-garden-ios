@@ -125,12 +125,37 @@ The app uses Supabase for backend services:
 
 ## 🌍 Environment Variables
 
-Create a `.env` file in the root directory:
-```env
-SUPABASE_URL=your_supabase_url
-SUPABASE_ANON_KEY=your_supabase_anon_key
-PLANTNET_API_KEY=your_plantnet_api_key
+The app now uses a centralized configuration system for better security and maintainability.
+
+### Configuration Files
+- **`config.js`** - Main configuration file with fallback values
+- **`.env.local`** - Local environment variables (git-ignored)
+- **`babel.config.js`** - Babel configuration for environment variable support
+
+### Setting Up Environment Variables
+
+1. **Install dependencies** (already included):
+```bash
+npm install react-native-dotenv
 ```
+
+2. **Create `.env.local`** file in the root directory:
+```env
+# Supabase Configuration
+SUPABASE_URL=your_supabase_url_here
+SUPABASE_ANON_KEY=your_supabase_anon_key_here
+
+# PlantNet API Configuration
+PLANTNET_API_KEY=your_plantnet_api_key_here
+```
+
+3. **Configuration is automatically loaded** from `config.js` with environment variable overrides
+
+### Security Benefits
+- ✅ API keys no longer hardcoded in source code
+- ✅ `.env.local` files are git-ignored
+- ✅ Fallback values for development
+- ✅ Easy deployment configuration
 
 ## 📐 Architecture
 

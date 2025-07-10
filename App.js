@@ -18,16 +18,30 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as ImagePicker from 'expo-image-picker';
 import { createClient } from '@supabase/supabase-js';
+import config from './config';
+import { getCurrentLocation, getPlantRecommendations } from './utils/locationService';
+import LoadingIndicator from './components/LoadingIndicator';
+import ErrorMessage from './components/ErrorMessage';
+import DiagnoseView from './components/DiagnoseView';
+import HomeView from './components/HomeView';
+import MyGardenView from './components/MyGardenView';
+import ExploreView from './components/ExploreView';
+import SmartPlantImage from './components/SmartPlantImage';
+import { imageCache } from './utils/imageCache';
+import { PLANT_DATABASE, PLANT_CATEGORIES, getPlantCareSchedule } from './data/plantDatabase';
+import { notificationService, scheduleAllPlantReminders } from './utils/notificationService';
+import WateringTracker from './components/WateringTracker';
+import { storageService } from './utils/storageService';
+import PlantIdentificationView from './components/PlantIdentificationView';
+import IdentificationHistory from './components/IdentificationHistory';
 
 const { width } = Dimensions.get('window');
 
 // Initialize Supabase client
-const supabaseUrl = 'https://ajktssbhxnukxksjjdyr.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqa3Rzc2JoeG51a3hrc2pqZHlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkwNDEwNTMsImV4cCI6MjA2NDYxNzA1M30.jARR7T5uxhF1iRiv96cdTyLbTYINfLs_JqtmtFnS3E0';
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabase = createClient(config.supabase.url, config.supabase.anonKey);
 
 // Supabase Storage URLs for plant images
-const SUPABASE_STORAGE_URL = `${supabaseUrl}/storage/v1/object/public/plant-images`;
+const SUPABASE_STORAGE_URL = `${config.supabase.url}/storage/v1/object/public/plant-images`;
 
 // Function to get Supabase image URLs with multiple format support
 const getSupabaseImageUrls = (plantName) => {
@@ -193,8 +207,15 @@ export default function SmartGardenPlanner() {
   const [showCameraModal, setShowCameraModal] = useState(false);
   const [identificationResult, setIdentificationResult] = useState(null);
   const [isIdentifying, setIsIdentifying] = useState(false);
+  const [showIdentificationView, setShowIdentificationView] = useState(false);
+  const [showIdentificationHistory, setShowIdentificationHistory] = useState(false);
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [showArticleModal, setShowArticleModal] = useState(false);
+  
+  // Error states
+  const [error, setError] = useState(null);
+  const [supabaseError, setSupabaseError] = useState(null);
+  const [locationError, setLocationError] = useState(null);
 
   // Get current month
   const currentMonth = new Date().toLocaleString('default', { month: 'long' });
@@ -293,12 +314,83 @@ export default function SmartGardenPlanner() {
 
   // Check Supabase connection on mount
   useEffect(() => {
+    loadSavedData();
     checkSupabaseConnection();
     setDefaultLocation();
+    preloadPlantImages();
+    initializeNotifications();
   }, []);
+
+  // Save garden data when it changes
+  useEffect(() => {
+    if (myGarden.length > 0) {
+      storageService.saveMyGarden(myGarden);
+    }
+  }, [myGarden]);
+
+  // Load saved data
+  const loadSavedData = async () => {
+    try {
+      // Load saved garden
+      const savedGarden = await storageService.loadMyGarden();
+      if (savedGarden && savedGarden.length > 0) {
+        setMyGarden(savedGarden);
+        console.log(`📱 Loaded ${savedGarden.length} plants from storage`);
+      }
+
+      // Load saved location
+      const savedLocation = await storageService.loadLocation();
+      if (savedLocation) {
+        setLocation(savedLocation.location);
+        setZone(savedLocation.zone);
+        console.log(`📍 Loaded saved location: ${savedLocation.location}`);
+      }
+
+      // Load preferences
+      const preferences = await storageService.loadPreferences();
+      if (preferences && preferences.selectedCategory) {
+        setSelectedCategory(preferences.selectedCategory);
+      }
+    } catch (error) {
+      console.error('Error loading saved data:', error);
+    }
+  };
+
+  // Preload plant images for better performance
+  const preloadPlantImages = async () => {
+    try {
+      const allImageUrls = [];
+      
+      // Collect all plant image URLs
+      plants.forEach(plant => {
+        if (plant.images && Array.isArray(plant.images)) {
+          allImageUrls.push(...plant.images);
+        }
+      });
+
+      // Collect article image URLs
+      gardeningArticles.forEach(article => {
+        if (article.image) {
+          allImageUrls.push(article.image);
+        }
+      });
+
+      console.log(`🖼️ Starting preload of ${allImageUrls.length} images`);
+      await imageCache.preloadImages(allImageUrls);
+      
+      // Log cache stats
+      const stats = await imageCache.getCacheStats();
+      if (stats) {
+        console.log(`📊 Image cache stats: ${stats.fileCount} files, ${stats.totalSizeMB}MB`);
+      }
+    } catch (error) {
+      console.error('Error preloading images:', error);
+    }
+  };
 
   const checkSupabaseConnection = async () => {
     try {
+      setSupabaseError(null);
       const { data, error } = await supabase
         .from('zip_codes')
         .select('zip_code')
@@ -309,46 +401,79 @@ export default function SmartGardenPlanner() {
       console.log('✅ Supabase connected successfully');
     } catch (error) {
       setConnectionStatus('disconnected');
-      console.log('⚠️ Using mock data (Supabase unavailable)');
+      setSupabaseError({
+        title: 'Database Connection Failed',
+        message: 'Using offline mode. Some features may be limited.',
+        type: 'warning'
+      });
+      console.log('⚠️ Using mock data (Supabase unavailable):', error.message);
     }
   };
 
   const setDefaultLocation = () => {
     if (!location) {
-      setLocation('Winston-Salem');
-      setZone('7b');
+      setLocation(config.app.defaultLocation);
+      setZone(config.app.defaultZone);
     }
   };
 
-  // Location detection using Expo Location
+  // Initialize notification service
+  const initializeNotifications = async () => {
+    try {
+      const initialized = await notificationService.initialize();
+      if (initialized) {
+        console.log('✅ Notifications initialized');
+        // Schedule daily garden check
+        await notificationService.scheduleDailyGardenCheck();
+      }
+    } catch (error) {
+      console.error('Error initializing notifications:', error);
+    }
+  };
+
+  // Location detection using proper reverse geocoding
   const detectLocation = async () => {
     try {
       setLoading(true);
       
-      // Request permissions
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission denied', 'Location permission is required to detect your location.');
-        setLoading(false);
-        return;
-      }
-
-      // Get current location
-      let location = await Location.getCurrentPositionAsync({});
-      const { latitude, longitude } = location.coords;
+      const locationResult = await getCurrentLocation();
       
-      // For demo purposes, hardcoded to Winston-Salem area
-      if (Math.abs(latitude - 36.09) < 0.5 && Math.abs(longitude - (-80.24)) < 0.5) {
-        setLocation('Winston-Salem, NC');
-        setZone('7b');
+      if (locationResult.success) {
+        setLocation(locationResult.address);
+        setZone(locationResult.zone);
+        console.log(`📍 Location detected: ${locationResult.address}, Zone ${locationResult.zone}`);
+        
+        // Save location data
+        await storageService.saveLocation({
+          location: locationResult.address,
+          zone: locationResult.zone,
+          coordinates: locationResult.coordinates,
+        });
+        
+        // Get plant recommendations for this zone
+        const recommendations = getPlantRecommendations(locationResult.zone);
+        console.log('🌱 Plant recommendations:', recommendations);
+        
+        Alert.alert(
+          'Location Detected!', 
+          `${locationResult.address}\nHardiness Zone: ${locationResult.zone}\n\nRecommended plants for your area have been updated.`
+        );
       } else {
-        setLocation('Winston-Salem');
-        setZone('7b');
+        // Fallback to default location
+        setLocation(config.app.defaultLocation);
+        setZone(config.app.defaultZone);
+        
+        Alert.alert(
+          'Location Detection Failed', 
+          `${locationResult.error || 'Could not detect location'}. Using default location: ${config.app.defaultLocation}`
+        );
       }
       
       setLoading(false);
     } catch (error) {
       console.error('Error detecting location:', error);
+      setLocation(config.app.defaultLocation);
+      setZone(config.app.defaultZone);
       Alert.alert('Error', 'Could not detect location. Using default location.');
       setLoading(false);
     }
@@ -414,19 +539,69 @@ export default function SmartGardenPlanner() {
   });
 
   // Garden management functions
-  const addToGarden = (plant) => {
+  const addToGarden = async (plant) => {
     if (!myGarden.find(p => p.name === plant.name)) {
-      setMyGarden([...myGarden, { ...plant, addedDate: new Date().toISOString() }]);
-      Alert.alert('Success!', `${plant.name} added to your garden`);
+      const newPlant = { 
+        ...plant, 
+        id: `${plant.name}-${Date.now()}`,
+        plantedDate: new Date().toISOString(),
+        lastWatered: new Date().toISOString(),
+        gardenName: 'My Garden'
+      };
+      
+      setMyGarden([...myGarden, newPlant]);
+      
+      // Schedule care reminders
+      await scheduleAllPlantReminders(newPlant, newPlant.plantedDate, 'My Garden');
+      
+      Alert.alert('Success!', `${plant.name} added to your garden. Care reminders have been scheduled!`);
     } else {
       Alert.alert('Already in Garden', `${plant.name} is already in your garden`);
     }
     setShowAddModal(false);
   };
 
-  const removeFromGarden = (plantName) => {
+  const removeFromGarden = async (plantName) => {
+    const plantToRemove = myGarden.find(p => p.name === plantName);
+    if (plantToRemove) {
+      // Cancel notifications for this plant
+      await notificationService.cancelPlantReminders(plantToRemove.id);
+    }
     setMyGarden(myGarden.filter(p => p.name !== plantName));
     Alert.alert('Removed', `${plantName} removed from your garden`);
+  };
+
+  // Update plant data (for watering tracking)
+  const updatePlant = (updatedPlant) => {
+    setMyGarden(myGarden.map(plant => 
+      plant.id === updatedPlant.id ? updatedPlant : plant
+    ));
+  };
+
+  // Handle plant identification result
+  const handlePlantIdentified = async (identifiedPlant) => {
+    setShowIdentificationView(false);
+    
+    // Find the plant in our database
+    const plantData = PLANT_DATABASE[identifiedPlant.name];
+    if (plantData) {
+      const newPlant = {
+        name: identifiedPlant.name,
+        ...plantData,
+        id: `${identifiedPlant.name}-${Date.now()}`,
+        plantedDate: new Date().toISOString(),
+        lastWatered: new Date().toISOString(),
+        gardenName: 'My Garden',
+        identifiedAt: new Date().toISOString(),
+        identificationConfidence: identifiedPlant.identificationConfidence,
+      };
+      
+      await addToGarden(newPlant);
+      Alert.alert(
+        'Plant Added!',
+        `${identifiedPlant.name} has been added to your garden with care reminders.`
+      );
+    }
   };
 
   // Camera and Plant Identification Functions
@@ -484,6 +659,18 @@ export default function SmartGardenPlanner() {
 
   const identifyPlant = async (imageUri) => {
     try {
+      setError(null);
+      
+      // Check internet connectivity first
+      const testResponse = await fetch('https://www.google.com', { 
+        method: 'HEAD',
+        timeout: 5000 
+      });
+      
+      if (!testResponse.ok) {
+        throw new Error('No internet connection');
+      }
+
       // Create FormData for PlantNet API
       const formData = new FormData();
       formData.append('images', {
@@ -497,25 +684,37 @@ export default function SmartGardenPlanner() {
       formData.append('no-reject', 'false');
       formData.append('lang', 'en');
 
-      // PlantNet API call
+      console.log('🔍 Starting plant identification...');
+
+      // PlantNet API call with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
       const response = await fetch(
-        'https://my-api.plantnet.org/v1/identify/worldwide?api-key=2b10VhJE8nNEGRdKjz3L9JXVf',
+        `${config.plantNet.baseUrl}?api-key=${config.plantNet.apiKey}`,
         {
           method: 'POST',
           body: formData,
           headers: {
             'Content-Type': 'multipart/form-data',
           },
+          signal: controller.signal,
         }
       );
 
+      clearTimeout(timeoutId);
+
       if (response.ok) {
         const data = await response.json();
+        console.log('🌿 PlantNet API response received');
+        
         if (data.results && data.results.length > 0) {
           const topResult = data.results[0];
           const plantName = topResult.species.scientificNameWithoutAuthor;
           const commonNames = topResult.species.commonNames;
           const confidence = Math.round(topResult.score * 100);
+          
+          console.log(`✅ Plant identified: ${commonNames?.[0] || plantName} (${confidence}% confidence)`);
           
           setIdentificationResult({
             scientificName: plantName,
@@ -525,14 +724,41 @@ export default function SmartGardenPlanner() {
             allResults: data.results.slice(0, 3) // Top 3 results
           });
         } else {
-          Alert.alert('No Match', 'Could not identify this plant. Try a clearer photo with visible leaves or flowers.');
+          setError({
+            title: 'No Plant Match Found',
+            message: 'Could not identify this plant. Try a clearer photo with visible leaves or flowers.',
+            type: 'info'
+          });
         }
+      } else if (response.status === 429) {
+        throw new Error('API rate limit exceeded. Please try again in a few minutes.');
+      } else if (response.status === 401) {
+        throw new Error('API key invalid. Please check configuration.');
       } else {
-        throw new Error('API request failed');
+        throw new Error(`API request failed with status ${response.status}`);
       }
     } catch (error) {
       console.error('Plant identification error:', error);
-      Alert.alert('Identification Failed', 'Could not identify the plant. Please check your internet connection and try again.');
+      
+      if (error.name === 'AbortError') {
+        setError({
+          title: 'Request Timeout',
+          message: 'Plant identification took too long. Please try again with a smaller image.',
+          type: 'warning'
+        });
+      } else if (error.message.includes('internet') || error.message.includes('network')) {
+        setError({
+          title: 'Connection Error',
+          message: 'Please check your internet connection and try again.',
+          type: 'error'
+        });
+      } else {
+        setError({
+          title: 'Identification Failed',
+          message: error.message || 'Could not identify the plant. Please try again.',
+          type: 'error'
+        });
+      }
     } finally {
       setIsIdentifying(false);
       setShowCameraModal(false);
@@ -1022,6 +1248,10 @@ export default function SmartGardenPlanner() {
           onPress={detectLocation}
           style={styles.locationButton}
           disabled={loading}
+          accessible={true}
+          accessibilityRole="button"
+          accessibilityLabel={`Current location: ${location}, Zone ${zone}`}
+          accessibilityHint="Tap to detect your current location and hardiness zone"
         >
           <Ionicons name="location-outline" size={16} color="#374151" />
           <View style={styles.locationTextContainer}>
@@ -1033,8 +1263,17 @@ export default function SmartGardenPlanner() {
           <Ionicons name="chevron-forward" size={16} color="#22c55e" />
         </TouchableOpacity>
         <View style={styles.headerButtons}>
-          <TouchableOpacity style={[styles.headerButton, styles.starButton]}>
-            <Ionicons name="star" size={20} color="#eab308" />
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={() => setShowIdentificationView(true)}
+          >
+            <Ionicons name="camera" size={20} color="#22c55e" />
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={styles.headerButton}
+            onPress={() => setShowIdentificationHistory(true)}
+          >
+            <Ionicons name="time-outline" size={20} color="#6b7280" />
           </TouchableOpacity>
           <TouchableOpacity style={styles.headerButton}>
             <Ionicons name="settings-outline" size={20} color="#6b7280" />
@@ -1044,85 +1283,39 @@ export default function SmartGardenPlanner() {
 
       {/* Conditional Content Based on Active Tab */}
       {activeTab === 'Home' ? (
-        <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Search Section */}
-        <View style={styles.searchSection}>
-          <View style={styles.searchContainer}>
-            <Ionicons name="search" size={20} color="#9ca3af" style={styles.searchIcon} />
-            <TextInput
-              style={styles.searchInput}
-              placeholder="Search vegetables"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholderTextColor="#9ca3af"
-            />
-          </View>
-          <TouchableOpacity style={styles.addButton}>
-            <Text style={styles.addButtonText}>Add plant</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* What to grow section */}
-        <View style={styles.growSection}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>
-              What to grow in{' '}
-              <Text style={styles.monthText}>{currentMonth}</Text>
-            </Text>
-            <TouchableOpacity>
-              <Ionicons name="ellipsis-vertical" size={20} color="#9ca3af" />
-            </TouchableOpacity>
-          </View>
-
-          {/* Category tabs */}
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            style={styles.categoryContainer}
-          >
-            {categories.map((category) => (
-              <TouchableOpacity
-                key={category}
-                onPress={() => setSelectedCategory(category)}
-                style={[
-                  styles.categoryTab,
-                  selectedCategory === category && styles.activeCategoryTab
-                ]}
-              >
-                <Text style={[
-                  styles.categoryText,
-                  selectedCategory === category && styles.activeCategoryText
-                ]}>
-                  {category}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          {/* Plants grid */}
-          <View style={styles.plantsGrid}>
-            {categoryFilteredPlants.map((plant, index) => (
-              <PlantCard key={index} plant={plant} />
-            ))}
-          </View>
-
-          {categoryFilteredPlants.length === 0 && (
-            <View style={styles.emptyState}>
-              <Ionicons name="search" size={64} color="#d1d5db" />
-              <Text style={styles.emptyTitle}>No plants found</Text>
-              <Text style={styles.emptyDescription}>
-                Try adjusting your search or category filter.
-              </Text>
-            </View>
-          )}
-        </View>
-        </ScrollView>
+        <HomeView 
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+          selectedCategory={selectedCategory}
+          setSelectedCategory={setSelectedCategory}
+          categoryFilteredPlants={categoryFilteredPlants}
+          currentMonth={currentMonth}
+          setSelectedPlant={setSelectedPlant}
+          setShowAddModal={setShowAddModal}
+        />
       ) : activeTab === 'My Garden' ? (
-        <MyGardenView />
+        <MyGardenView 
+          myGarden={myGarden}
+          removeFromGarden={removeFromGarden}
+        />
+      ) : activeTab === 'Care' ? (
+        <WateringTracker 
+          plants={myGarden}
+          onUpdatePlant={updatePlant}
+        />
       ) : activeTab === 'Explore' ? (
-        <ExploreView />
+        <ExploreView 
+          gardeningArticles={gardeningArticles}
+          setSelectedArticle={setSelectedArticle}
+          setShowArticleModal={setShowArticleModal}
+        />
+      ) : activeTab === 'Diagnose' ? (
+        <DiagnoseView myGarden={myGarden} />
       ) : (
-        <MyGardenView />
+        <MyGardenView 
+          myGarden={myGarden}
+          removeFromGarden={removeFromGarden}
+        />
       )}
 
       {/* Modals */}
@@ -1132,11 +1325,93 @@ export default function SmartGardenPlanner() {
       <LoadingModal />
       <ArticleModal />
 
+      {/* Plant Identification View */}
+      {showIdentificationView && (
+        <PlantIdentificationView
+          onIdentified={handlePlantIdentified}
+          onClose={() => setShowIdentificationView(false)}
+        />
+      )}
+
+      {/* Identification History Modal */}
+      <Modal
+        animationType="slide"
+        transparent={false}
+        visible={showIdentificationHistory}
+        onRequestClose={() => setShowIdentificationHistory(false)}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity
+              style={styles.closeButton}
+              onPress={() => setShowIdentificationHistory(false)}
+            >
+              <Ionicons name="close" size={24} color="#374151" />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Plant ID History</Text>
+            <View style={styles.placeholder} />
+          </View>
+          <IdentificationHistory
+            onSelectPlant={(plantName) => {
+              setShowIdentificationHistory(false);
+              const plant = plants.find(p => p.name === plantName);
+              if (plant) {
+                setSelectedPlant(plant);
+                setShowAddModal(true);
+              }
+            }}
+          />
+        </SafeAreaView>
+      </Modal>
+
+      {/* Loading Indicators */}
+      <LoadingIndicator 
+        visible={loading} 
+        text="Detecting location..." 
+        overlay={true}
+      />
+      
+      <LoadingIndicator 
+        visible={isIdentifying} 
+        text="Identifying plant..." 
+        overlay={true}
+      />
+
+      {/* Error Messages */}
+      {error && (
+        <ErrorMessage
+          visible={true}
+          title={error.title}
+          message={error.message}
+          type={error.type}
+          onRetry={() => setError(null)}
+          retryText="Dismiss"
+        />
+      )}
+
+      {supabaseError && (
+        <ErrorMessage
+          visible={true}
+          title={supabaseError.title}
+          message={supabaseError.message}
+          type={supabaseError.type}
+          onRetry={() => {
+            setSupabaseError(null);
+            checkSupabaseConnection();
+          }}
+          retryText="Retry Connection"
+        />
+      )}
+
       {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
         <TouchableOpacity 
           style={styles.navItem}
           onPress={() => setActiveTab('Home')}
+          accessible={true}
+          accessibilityRole="tab"
+          accessibilityLabel="Home tab"
+          accessibilityState={{ selected: activeTab === 'Home' }}
         >
           <Ionicons 
             name="home" 
@@ -1151,6 +1426,10 @@ export default function SmartGardenPlanner() {
         <TouchableOpacity 
           style={styles.navItem}
           onPress={() => setActiveTab('My Garden')}
+          accessible={true}
+          accessibilityRole="tab"
+          accessibilityLabel="My Garden tab"
+          accessibilityState={{ selected: activeTab === 'My Garden' }}
         >
           <Ionicons 
             name={activeTab === 'My Garden' ? "leaf" : "leaf-outline"} 
@@ -1163,14 +1442,30 @@ export default function SmartGardenPlanner() {
           ]}>My Garden</Text>
         </TouchableOpacity>
         <TouchableOpacity 
-          style={styles.addNavButton}
-          onPress={() => setShowCameraModal(true)}
+          style={styles.navItem}
+          onPress={() => setActiveTab('Care')}
+          accessible={true}
+          accessibilityRole="tab"
+          accessibilityLabel="Care tab"
+          accessibilityState={{ selected: activeTab === 'Care' }}
         >
-          <Ionicons name="camera" size={24} color="white" />
+          <Ionicons 
+            name={activeTab === 'Care' ? "water" : "water-outline"} 
+            size={24} 
+            color={activeTab === 'Care' ? "#22c55e" : "#9ca3af"} 
+          />
+          <Text style={[
+            styles.navText, 
+            activeTab === 'Care' && styles.activeNavText
+          ]}>Care</Text>
         </TouchableOpacity>
         <TouchableOpacity 
           style={styles.navItem}
           onPress={() => setActiveTab('Explore')}
+          accessible={true}
+          accessibilityRole="tab"
+          accessibilityLabel="Explore tab"
+          accessibilityState={{ selected: activeTab === 'Explore' }}
         >
           <Ionicons 
             name={activeTab === 'Explore' ? "bulb" : "bulb-outline"} 
@@ -1182,9 +1477,23 @@ export default function SmartGardenPlanner() {
             activeTab === 'Explore' && styles.activeNavText
           ]}>Explore</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="checkmark-circle-outline" size={24} color="#9ca3af" />
-          <Text style={styles.navText}>Diagnose</Text>
+        <TouchableOpacity 
+          style={styles.navItem}
+          onPress={() => setActiveTab('Diagnose')}
+          accessible={true}
+          accessibilityRole="tab"
+          accessibilityLabel="Diagnose tab"
+          accessibilityState={{ selected: activeTab === 'Diagnose' }}
+        >
+          <Ionicons 
+            name={activeTab === 'Diagnose' ? "medical" : "medical-outline"} 
+            size={24} 
+            color={activeTab === 'Diagnose' ? "#22c55e" : "#9ca3af"} 
+          />
+          <Text style={[
+            styles.navText, 
+            activeTab === 'Diagnose' && styles.activeNavText
+          ]}>Diagnose</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -1457,6 +1766,31 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#f9fafb',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: 'white',
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  closeButton: {
+    padding: 5,
+  },
+  placeholder: {
+    width: 34,
   },
   modalContent: {
     backgroundColor: 'white',
